@@ -149,6 +149,15 @@ class LocalActivityExecutionContext {
     return executionResult.isDone();
   }
 
+  /**
+   * @return the future that is completed with the terminal result of this execution. For internal
+   *     observation only, callers must never complete it.
+   */
+  @Nonnull
+  CompletableFuture<LocalActivityResult> getExecutionResult() {
+    return executionResult;
+  }
+
   public void newAttempt() {
     executionParams.getOnNewAttemptCallback().apply();
   }

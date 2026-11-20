@@ -25,7 +25,14 @@ public class FixedSizeSlotSupplier<SI extends SlotInfo> implements SlotSupplier<
   public SlotSupplierFuture reserveSlot(SlotReserveContext<SI> ctx) throws Exception {
     CompletableFuture<Void> slotFuture = executorSlotsSemaphore.acquire();
     return SlotSupplierFuture.fromCompletableFuture(
-        slotFuture.thenApply(ignored -> new SlotPermit()), () -> slotFuture.cancel(true));
+        slotFuture.thenApply(ignored -> new SlotPermit()),
+        () -> {
+          // If cancellation fails, the semaphore already granted the permit to this reservation.
+          // That permit can never be delivered to the aborted reservation, so refund it directly.
+          if (!slotFuture.cancel(true)) {
+            executorSlotsSemaphore.release();
+          }
+        });
   }
 
   @Override

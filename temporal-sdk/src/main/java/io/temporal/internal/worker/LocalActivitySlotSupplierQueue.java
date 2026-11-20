@@ -64,26 +64,55 @@ class LocalActivitySlotSupplierQueue implements Shutdownable {
       QueuedLARequest request = null;
       try {
         request = requestQueue.take();
+        LocalActivityExecutionContext executionContext = request.task.getExecutionContext();
+        if (executionContext.isCompleted()) {
+          // The execution reached a terminal result (e.g. scheduleToClose or scheduleToStart
+          // timeout) while still waiting in the queue, no need to reserve a slot for it.
+          continue;
+        }
 
         SlotSupplierFuture future = slotSupplier.reserveSlot(request.data);
         try {
-          slotPermit = future.get();
+          // Wait for either a slot reservation or a terminal completion of the execution.
+          CompletableFuture.anyOf(future, executionContext.getExecutionResult()).get();
         } catch (InterruptedException e) {
-          SlotPermit maybePermitAnyway = future.abortReservation();
+          SlotPermit maybePermitAnyway = abortReservationQuietly(future);
           if (maybePermitAnyway != null) {
             slotSupplier.releaseSlot(SlotReleaseReason.neverUsed(), maybePermitAnyway);
           }
           Thread.currentThread().interrupt();
           return;
         } catch (ExecutionException e) {
-          log.error(
-              "Error reserving local activity slot, dropped activity id {}",
-              request.task.getActivityId(),
-              e);
+          if (!executionContext.isCompleted()) {
+            log.error(
+                "Error reserving local activity slot, dropped activity id {}",
+                request.task.getActivityId(),
+                e);
+          }
           continue;
         }
 
-        request.task.getExecutionContext().setPermit(slotPermit);
+        if (executionContext.isCompleted()) {
+          // The execution reached a terminal result while waiting for a slot. This attempt is
+          // dead and must not be dispatched. The queue thread is the sole owner of any permit
+          // granted during the wait and releases it exactly once.
+          cancelScheduleToStart(request.task);
+          if (future.isDone()) {
+            if (!future.isCompletedExceptionally()) {
+              slotSupplier.releaseSlot(SlotReleaseReason.neverUsed(), future.join());
+            }
+          } else {
+            SlotPermit maybePermitAnyway = abortReservationQuietly(future);
+            if (maybePermitAnyway != null) {
+              slotSupplier.releaseSlot(SlotReleaseReason.neverUsed(), maybePermitAnyway);
+            }
+          }
+          continue;
+        }
+
+        // If the execution is not completed, the reservation is guaranteed to be done here.
+        slotPermit = future.join();
+        executionContext.setPermit(slotPermit);
         afterReservedCallback.apply(request.task);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
@@ -107,6 +136,26 @@ class LocalActivitySlotSupplierQueue implements Shutdownable {
           return;
         }
       }
+    }
+  }
+
+  /**
+   * Aborts a pending reservation. {@link SlotSupplierFuture#abortReservation()} may throw if the
+   * reservation already completed exceptionally or was concurrently aborted, in which case there is
+   * no permit to return.
+   */
+  private static SlotPermit abortReservationQuietly(SlotSupplierFuture future) {
+    try {
+      return future.abortReservation();
+    } catch (CancellationException | CompletionException e) {
+      return null;
+    }
+  }
+
+  private static void cancelScheduleToStart(LocalActivityAttemptTask task) {
+    ScheduledFuture<?> scheduleToStartFuture = task.getScheduleToStartFuture();
+    if (scheduleToStartFuture != null) {
+      scheduleToStartFuture.cancel(false);
     }
   }
 
