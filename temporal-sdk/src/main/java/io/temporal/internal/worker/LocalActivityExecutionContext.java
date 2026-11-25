@@ -26,7 +26,7 @@ class LocalActivityExecutionContext {
   private @Nullable ScheduledFuture<?> scheduleToCloseFuture;
   private final @Nonnull CompletableFuture<LocalActivityResult> executionResult =
       new CompletableFuture<>();
-  private @Nullable SlotPermit permit;
+  private final AtomicReference<SlotPermit> permit = new AtomicReference<>();
 
   public LocalActivityExecutionContext(
       @Nonnull ExecuteLocalActivityParameters executionParams,
@@ -163,11 +163,20 @@ class LocalActivityExecutionContext {
   }
 
   public void setPermit(SlotPermit permit) {
-    this.permit = permit;
+    this.permit.set(permit);
   }
 
   @Nullable
   public SlotPermit getPermit() {
-    return permit;
+    return permit.get();
+  }
+
+  /**
+   * Atomically takes ownership of the current slot permit, returning it or null if it was already
+   * taken. Used by timeout abandonment where the attempt holding the permit may be unknown.
+   */
+  @Nullable
+  public SlotPermit takePermit() {
+    return permit.getAndSet(null);
   }
 }

@@ -90,6 +90,8 @@ public final class WorkerOptions {
     private boolean activityTaskPollersConfigured;
     private boolean nexusTaskPollersConfigured;
     private Duration defaultLocalActivityScheduleToStartTimeout;
+    private boolean localActivityAbandonTimedOutExecutions;
+    private int localActivityMaxAbandonedExecutions;
 
     private Builder() {}
 
@@ -135,6 +137,8 @@ public final class WorkerOptions {
       this.nexusTaskPollersConfigured = o.nexusTaskPollersConfigured;
       this.defaultLocalActivityScheduleToStartTimeout =
           o.defaultLocalActivityScheduleToStartTimeout;
+      this.localActivityAbandonTimedOutExecutions = o.localActivityAbandonTimedOutExecutions;
+      this.localActivityMaxAbandonedExecutions = o.localActivityMaxAbandonedExecutions;
     }
 
     /**
@@ -408,6 +412,40 @@ public final class WorkerOptions {
     @Experimental
     public Builder setDefaultLocalActivityScheduleToStartTimeout(@Nullable Duration timeout) {
       this.defaultLocalActivityScheduleToStartTimeout = timeout;
+      return this;
+    }
+
+    /**
+     * When enabled, the executor slot permit of a Local Activity attempt that reaches a terminal
+     * StartToClose or ScheduleToClose timeout while user code is still running is released back to
+     * the worker, allowing other Local Activities to use that capacity. The timed-out user code
+     * continues executing on an abandoned thread that no longer counts towards the Local Activity
+     * concurrency limit; a retry of the Local Activity may run concurrently with the abandoned
+     * attempt. Abandoned execution is bounded by {@link
+     * #setLocalActivityMaxAbandonedExecutions(int)}.
+     *
+     * <p>This does not interrupt, cancel or terminate user code. Disabled by default.
+     *
+     * <p>Experimental. This API may change in a future release.
+     */
+    @Experimental
+    public Builder setLocalActivityAbandonTimedOutExecutions(boolean enable) {
+      this.localActivityAbandonTimedOutExecutions = enable;
+      return this;
+    }
+
+    /**
+     * Maximum number of additional executor threads allowed for abandoned Local Activity executions
+     * whose timed-out user code keeps running. When the bound is reached, the worker behaves as if
+     * abandonment is disabled until an abandoned thread returns.
+     *
+     * <p>Default is 0.
+     *
+     * <p>Experimental. This API may change in a future release.
+     */
+    @Experimental
+    public Builder setLocalActivityMaxAbandonedExecutions(int maxAbandonedExecutions) {
+      this.localActivityMaxAbandonedExecutions = maxAbandonedExecutions;
       return this;
     }
 
@@ -706,7 +744,9 @@ public final class WorkerOptions {
           workflowTaskPollersConfigured,
           activityTaskPollersConfigured,
           nexusTaskPollersConfigured,
-          defaultLocalActivityScheduleToStartTimeout);
+          defaultLocalActivityScheduleToStartTimeout,
+          localActivityAbandonTimedOutExecutions,
+          localActivityMaxAbandonedExecutions);
     }
 
     public WorkerOptions validateAndBuildWithDefaults() {
@@ -724,6 +764,8 @@ public final class WorkerOptions {
       Preconditions.checkState(
           maxConcurrentLocalActivityExecutionSize >= 0,
           "negative maxConcurrentLocalActivityExecutionSize");
+      Preconditions.checkState(
+          localActivityMaxAbandonedExecutions >= 0, "negative localActivityMaxAbandonedExecutions");
       if (workerTuner != null) {
         Preconditions.checkState(
             maxConcurrentActivityExecutionSize == 0,
@@ -850,7 +892,9 @@ public final class WorkerOptions {
           workflowTaskPollersConfigured,
           activityTaskPollersConfigured,
           nexusTaskPollersConfigured,
-          defaultLocalActivityScheduleToStartTimeout);
+          defaultLocalActivityScheduleToStartTimeout,
+          localActivityAbandonTimedOutExecutions,
+          localActivityMaxAbandonedExecutions);
     }
   }
 
@@ -890,6 +934,8 @@ public final class WorkerOptions {
   private final boolean activityTaskPollersConfigured;
   private final boolean nexusTaskPollersConfigured;
   private final @Nullable Duration defaultLocalActivityScheduleToStartTimeout;
+  private final boolean localActivityAbandonTimedOutExecutions;
+  private final int localActivityMaxAbandonedExecutions;
 
   private WorkerOptions(
       double maxWorkerActivitiesPerSecond,
@@ -927,7 +973,9 @@ public final class WorkerOptions {
       boolean workflowTaskPollersConfigured,
       boolean activityTaskPollersConfigured,
       boolean nexusTaskPollersConfigured,
-      @Nullable Duration defaultLocalActivityScheduleToStartTimeout) {
+      @Nullable Duration defaultLocalActivityScheduleToStartTimeout,
+      boolean localActivityAbandonTimedOutExecutions,
+      int localActivityMaxAbandonedExecutions) {
     this.maxWorkerActivitiesPerSecond = maxWorkerActivitiesPerSecond;
     this.maxConcurrentActivityExecutionSize = maxConcurrentActivityExecutionSize;
     this.maxConcurrentWorkflowTaskExecutionSize = maxConcurrentWorkflowTaskExecutionSize;
@@ -964,6 +1012,8 @@ public final class WorkerOptions {
     this.activityTaskPollersConfigured = activityTaskPollersConfigured;
     this.nexusTaskPollersConfigured = nexusTaskPollersConfigured;
     this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
+    this.localActivityAbandonTimedOutExecutions = localActivityAbandonTimedOutExecutions;
+    this.localActivityMaxAbandonedExecutions = localActivityMaxAbandonedExecutions;
   }
 
   /**
@@ -1003,6 +1053,16 @@ public final class WorkerOptions {
   @Nullable
   public Duration getDefaultLocalActivityScheduleToStartTimeout() {
     return defaultLocalActivityScheduleToStartTimeout;
+  }
+
+  @Experimental
+  public boolean getLocalActivityAbandonTimedOutExecutions() {
+    return localActivityAbandonTimedOutExecutions;
+  }
+
+  @Experimental
+  public int getLocalActivityMaxAbandonedExecutions() {
+    return localActivityMaxAbandonedExecutions;
   }
 
   public double getMaxWorkerActivitiesPerSecond() {
@@ -1198,7 +1258,9 @@ public final class WorkerOptions {
         && Objects.equals(preferredVersionProvider, that.preferredVersionProvider)
         && Objects.equals(
             defaultLocalActivityScheduleToStartTimeout,
-            that.defaultLocalActivityScheduleToStartTimeout);
+            that.defaultLocalActivityScheduleToStartTimeout)
+        && localActivityAbandonTimedOutExecutions == that.localActivityAbandonTimedOutExecutions
+        && localActivityMaxAbandonedExecutions == that.localActivityMaxAbandonedExecutions;
   }
 
   @Override
@@ -1236,7 +1298,9 @@ public final class WorkerOptions {
         allowActivityHeartbeatDuringShutdown,
         disablePayloadErrorLimit,
         preferredVersionProvider,
-        defaultLocalActivityScheduleToStartTimeout);
+        defaultLocalActivityScheduleToStartTimeout,
+        localActivityAbandonTimedOutExecutions,
+        localActivityMaxAbandonedExecutions);
   }
 
   @Override
@@ -1309,6 +1373,10 @@ public final class WorkerOptions {
         + preferredVersionProvider
         + ", defaultLocalActivityScheduleToStartTimeout="
         + defaultLocalActivityScheduleToStartTimeout
+        + ", localActivityAbandonTimedOutExecutions="
+        + localActivityAbandonTimedOutExecutions
+        + ", localActivityMaxAbandonedExecutions="
+        + localActivityMaxAbandonedExecutions
         + '}';
   }
 }

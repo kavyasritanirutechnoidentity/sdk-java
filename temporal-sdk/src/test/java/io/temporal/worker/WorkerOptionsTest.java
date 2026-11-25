@@ -251,6 +251,29 @@ public class WorkerOptionsTest {
   }
 
   @Test
+  public void rejectsNegativeLocalActivityMaxAbandonedExecutions() {
+    IllegalStateException exception =
+        assertThrows(
+            IllegalStateException.class,
+            () ->
+                WorkerOptions.newBuilder()
+                    .setLocalActivityMaxAbandonedExecutions(-1)
+                    .validateAndBuildWithDefaults());
+    assertEquals("negative localActivityMaxAbandonedExecutions", exception.getMessage());
+  }
+
+  @Test
+  public void acceptsZeroLocalActivityMaxAbandonedExecutions() {
+    WorkerOptions options =
+        WorkerOptions.newBuilder()
+            .setLocalActivityAbandonTimedOutExecutions(true)
+            .setLocalActivityMaxAbandonedExecutions(0)
+            .validateAndBuildWithDefaults();
+    assertTrue(options.getLocalActivityAbandonTimedOutExecutions());
+    assertEquals(0, options.getLocalActivityMaxAbandonedExecutions());
+  }
+
+  @Test
   public void rejectsNonPositiveMaxEagerActivityReservationsPerWorkflowTask() {
     for (int value : new int[] {0, -1}) {
       IllegalStateException exception =

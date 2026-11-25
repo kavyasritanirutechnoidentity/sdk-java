@@ -21,6 +21,10 @@ public abstract class SlotReleaseReason {
     return new Error(exception);
   }
 
+  public static SlotReleaseReason abandoned() {
+    return new Abandoned();
+  }
+
   public boolean isError() {
     return false;
   }
@@ -41,6 +45,13 @@ public abstract class SlotReleaseReason {
 
   /** The slot was released because it was never needed. */
   public static class NeverUsed extends SlotReleaseReason {}
+
+  /**
+   * The slot was released because the execution holding it reached a terminal timeout while user
+   * code was still running. The abandoned user code may continue executing on its own thread but no
+   * longer counts against the concurrency limit.
+   */
+  public static class Abandoned extends SlotReleaseReason {}
 
   /**
    * The slot was released because some error was encountered before the slot could be used to

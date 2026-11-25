@@ -505,7 +505,10 @@ final class LocalActivityWorker implements Startable, Shutdownable {
             taskCounter.recordFailed();
           }
         }
-        slotSupplier.releaseSlot(reason, executionContext.getPermit());
+        SlotPermit releasedPermit = executionContext.takePermit();
+        if (releasedPermit != null) {
+          slotSupplier.releaseSlot(reason, releasedPermit);
+        }
         mdc.remove(LoggerTag.ACTIVITY_ID);
         mdc.remove(LoggerTag.ACTIVITY_TYPE);
         mdc.remove(LoggerTag.WORKFLOW_ID);
@@ -608,8 +611,29 @@ final class LocalActivityWorker implements Startable, Shutdownable {
     }
   }
 
+  /**
+   * Releases the slot permit of a timed-out attempt whose user code is still running, so the
+   * executor capacity can serve other Local Activities. The abandoned user code continues on its
+   * own thread without a permit; its eventual completion is discarded by {@code callback()} and its
+   * finally block skips the release since the permit was already taken.
+   */
+  private void abandonPermitIfRunning(LocalActivityExecutionContext executionContext) {
+    if (!options.getLocalActivityAbandonTimedOutExecutions()) {
+      return;
+    }
+    SlotPermit permit = executionContext.takePermit();
+    if (permit != null) {
+      log.warn(
+          "Abandoning executor permit of local activity {} after timeout. User code may still be "
+              + "executing on an abandoned thread that no longer counts towards the local activity "
+              + "concurrency limit.",
+          executionContext.getActivityId());
+      slotSupplier.releaseSlot(SlotReleaseReason.abandoned(), permit);
+    }
+  }
+
   /** Used to perform both scheduleToStart and scheduleToClose timeouts. */
-  private static class FinalTimeoutHandler implements Runnable {
+  private class FinalTimeoutHandler implements Runnable {
     private final LocalActivityExecutionContext executionContext;
     private final TimeoutType timeoutType;
 
@@ -621,13 +645,19 @@ final class LocalActivityWorker implements Startable, Shutdownable {
 
     @Override
     public void run() {
-      executionContext.callback(
-          failed(
-              executionContext.getActivityId(),
-              executionContext.getCurrentAttempt(),
-              RetryState.RETRY_STATE_TIMEOUT,
-              newTimeoutFailure(timeoutType, executionContext.getLastAttemptFailure()),
-              null));
+      boolean completed =
+          executionContext.callback(
+              failed(
+                  executionContext.getActivityId(),
+                  executionContext.getCurrentAttempt(),
+                  RetryState.RETRY_STATE_TIMEOUT,
+                  newTimeoutFailure(timeoutType, executionContext.getLastAttemptFailure()),
+                  null));
+      // Only a running scheduleToClose timeout owns a permit to abandon. scheduleToStart fires
+      // before the attempt is dispatched, so there is nothing to abandon.
+      if (completed && TimeoutType.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE.equals(timeoutType)) {
+        abandonPermitIfRunning(executionContext);
+      }
     }
   }
 
@@ -653,6 +683,9 @@ final class LocalActivityWorker implements Startable, Shutdownable {
             Objects.requireNonNull(
                 retryDecision.nextAttemptBackoff, "nextAttemptBackoff is expected to not be null"),
             newTimeoutFailure(TimeoutType.TIMEOUT_TYPE_START_TO_CLOSE, null));
+        // The timed-out attempt may still be running user code holding a permit; abandon it so
+        // its executor capacity can serve the retry or other Local Activities.
+        abandonPermitIfRunning(executionContext);
       } else {
         // RetryState.RETRY_STATE_TIMEOUT happens only when scheduleToClose is fired
         // scheduleToClose timeout is effectively replacing the original startToClose
@@ -660,13 +693,17 @@ final class LocalActivityWorker implements Startable, Shutdownable {
             RetryState.RETRY_STATE_TIMEOUT.equals(retryDecision.retryState)
                 ? TimeoutType.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE
                 : TimeoutType.TIMEOUT_TYPE_START_TO_CLOSE;
-        executionContext.callback(
+        // Abandon the permit only if this timeout produced the terminal completion. If another
+        // completion already won, the permit belongs to that path and must not be released here.
+        if (executionContext.callback(
             failed(
                 activityId,
                 timingOutAttempt,
                 retryDecision.retryState,
                 newTimeoutFailure(timeoutType, executionContext.getLastAttemptFailure()),
-                retryDecision.nextAttemptBackoff));
+                retryDecision.nextAttemptBackoff))) {
+          abandonPermitIfRunning(executionContext);
+        }
       }
     }
   }
@@ -684,6 +721,19 @@ final class LocalActivityWorker implements Startable, Shutdownable {
                 return thread;
               });
 
+      // Executor thread capacity is the normal slot count plus a bounded allowance for abandoned
+      // executions whose timed-out user code keeps running after its permit was released.
+      long maximumSlots = slotSupplier.maximumSlots().orElse(Integer.MAX_VALUE);
+      // Additional executor capacity for abandoned executions is only added when abandonment is
+      // enabled; a disabled feature keeps the existing executor maximum regardless of allowance.
+      int maxAbandonedExecutions =
+          options.getLocalActivityAbandonTimedOutExecutions()
+              ? options.getLocalActivityMaxAbandonedExecutions()
+              : 0;
+      int threadPoolMax =
+          maximumSlots >= Integer.MAX_VALUE - maxAbandonedExecutions
+              ? Integer.MAX_VALUE
+              : (int) maximumSlots + maxAbandonedExecutions;
       this.activityAttemptTaskExecutor =
           new PollTaskExecutor<>(
               namespace,
@@ -691,7 +741,7 @@ final class LocalActivityWorker implements Startable, Shutdownable {
               options.getIdentity(),
               new AttemptTaskHandlerImpl(handler),
               pollerOptions,
-              slotSupplier.maximumSlots().orElse(Integer.MAX_VALUE),
+              threadPoolMax,
               options.isUsingVirtualThreads(),
               options.getLoggerMdc());
 

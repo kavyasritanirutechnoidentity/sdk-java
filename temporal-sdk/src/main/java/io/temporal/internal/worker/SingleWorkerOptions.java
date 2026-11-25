@@ -56,6 +56,8 @@ public final class SingleWorkerOptions {
     private CancellationToken<CancellationException> storageCancellation = CancellationToken.none();
     private PrefixedMdc loggerMdc;
     private Duration defaultLocalActivityScheduleToStartTimeout;
+    private boolean localActivityAbandonTimedOutExecutions;
+    private int localActivityMaxAbandonedExecutions;
 
     private Builder() {}
 
@@ -90,6 +92,9 @@ public final class SingleWorkerOptions {
       this.loggerMdc = options.getLoggerMdc();
       this.defaultLocalActivityScheduleToStartTimeout =
           options.getDefaultLocalActivityScheduleToStartTimeout();
+      this.localActivityAbandonTimedOutExecutions =
+          options.getLocalActivityAbandonTimedOutExecutions();
+      this.localActivityMaxAbandonedExecutions = options.getLocalActivityMaxAbandonedExecutions();
     }
 
     public Builder setIdentity(String identity) {
@@ -144,6 +149,16 @@ public final class SingleWorkerOptions {
     public Builder setDefaultLocalActivityScheduleToStartTimeout(
         Duration defaultLocalActivityScheduleToStartTimeout) {
       this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
+      return this;
+    }
+
+    public Builder setLocalActivityAbandonTimedOutExecutions(boolean enable) {
+      this.localActivityAbandonTimedOutExecutions = enable;
+      return this;
+    }
+
+    public Builder setLocalActivityMaxAbandonedExecutions(int maxAbandonedExecutions) {
+      this.localActivityMaxAbandonedExecutions = maxAbandonedExecutions;
       return this;
     }
 
@@ -282,7 +297,9 @@ public final class SingleWorkerOptions {
           this.externalStorageRunner,
           this.storageCancellation,
           loggerMdc,
-          this.defaultLocalActivityScheduleToStartTimeout);
+          this.defaultLocalActivityScheduleToStartTimeout,
+          this.localActivityAbandonTimedOutExecutions,
+          this.localActivityMaxAbandonedExecutions);
     }
   }
 
@@ -312,6 +329,8 @@ public final class SingleWorkerOptions {
   private final CancellationToken<CancellationException> storageCancellation;
   private final PrefixedMdc loggerMdc;
   private final @Nullable Duration defaultLocalActivityScheduleToStartTimeout;
+  private final boolean localActivityAbandonTimedOutExecutions;
+  private final int localActivityMaxAbandonedExecutions;
 
   private SingleWorkerOptions(
       String identity,
@@ -339,7 +358,9 @@ public final class SingleWorkerOptions {
       @Nullable ExternalStorageRunner externalStorageRunner,
       CancellationToken<CancellationException> storageCancellation,
       PrefixedMdc loggerMdc,
-      @Nullable Duration defaultLocalActivityScheduleToStartTimeout) {
+      @Nullable Duration defaultLocalActivityScheduleToStartTimeout,
+      boolean localActivityAbandonTimedOutExecutions,
+      int localActivityMaxAbandonedExecutions) {
     this.identity = identity;
     this.binaryChecksum = binaryChecksum;
     this.buildId = buildId;
@@ -366,6 +387,8 @@ public final class SingleWorkerOptions {
     this.storageCancellation = storageCancellation;
     this.loggerMdc = loggerMdc;
     this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
+    this.localActivityAbandonTimedOutExecutions = localActivityAbandonTimedOutExecutions;
+    this.localActivityMaxAbandonedExecutions = localActivityMaxAbandonedExecutions;
   }
 
   public String getIdentity() {
@@ -444,6 +467,14 @@ public final class SingleWorkerOptions {
   @Nullable
   public Duration getDefaultLocalActivityScheduleToStartTimeout() {
     return defaultLocalActivityScheduleToStartTimeout;
+  }
+
+  public boolean getLocalActivityAbandonTimedOutExecutions() {
+    return localActivityAbandonTimedOutExecutions;
+  }
+
+  public int getLocalActivityMaxAbandonedExecutions() {
+    return localActivityMaxAbandonedExecutions;
   }
 
   public long getDefaultDeadlockDetectionTimeout() {

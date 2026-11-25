@@ -1163,6 +1163,9 @@ public final class Worker {
         .setUsingVirtualThreads(options.isUsingVirtualThreadsOnLocalActivityWorker())
         .setDefaultLocalActivityScheduleToStartTimeout(
             options.getDefaultLocalActivityScheduleToStartTimeout())
+        .setLocalActivityAbandonTimedOutExecutions(
+            options.getLocalActivityAbandonTimedOutExecutions())
+        .setLocalActivityMaxAbandonedExecutions(options.getLocalActivityMaxAbandonedExecutions())
         .build();
   }
 
