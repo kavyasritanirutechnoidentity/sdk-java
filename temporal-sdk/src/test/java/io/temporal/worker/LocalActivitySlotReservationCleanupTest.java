@@ -19,6 +19,7 @@ import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
 import java.time.Duration;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -187,11 +188,10 @@ public class LocalActivitySlotReservationCleanupTest {
 
   /**
    * Counts {@code abortReservation} invocations on reservations it hands out. The returned wrapper
-   * delegates the abort to the inner {@code SlotSupplierFuture}, which performs the real abort and
-   * the semaphore refund. The inner future completing normally and the bridge to the outer wrapper
-   * are synchronous, so the inner abort cannot return a permit here: if the inner future had
-   * already delivered a permit, the outer wrapper would already be completed and this abort handler
-   * would never run.
+   * mirrors {@code SlotSupplierFuture.fromCompletableFuture} but delegates the abort to the inner
+   * {@code SlotSupplierFuture#abortReservation()} rather than {@code cancel()}, which {@code
+   * SlotSupplierFuture} does not support. If the inner reservation already completed normally, the
+   * abort returns its permit to the caller, matching the standard contract.
    */
   private static class AbortRecordingSlotSupplier
       extends CountingSlotSupplier<LocalActivitySlotInfo> {
@@ -205,12 +205,26 @@ public class LocalActivitySlotReservationCleanupTest {
     public SlotSupplierFuture reserveSlot(SlotReserveContext<LocalActivitySlotInfo> ctx)
         throws Exception {
       SlotSupplierFuture inner = super.reserveSlot(ctx);
-      return SlotSupplierFuture.fromCompletableFuture(
-          inner,
-          () -> {
-            abortCalls.incrementAndGet();
-            SlotPermit unused = inner.abortReservation();
+      SlotSupplierFuture wrapper =
+          new SlotSupplierFuture() {
+            @Override
+            public SlotPermit abortReservation() {
+              abortCalls.incrementAndGet();
+              if (completeExceptionally(new CancellationException("Reservation aborted"))) {
+                return inner.abortReservation();
+              }
+              return join();
+            }
+          };
+      inner.whenComplete(
+          (permit, throwable) -> {
+            if (throwable != null) {
+              wrapper.completeExceptionally(throwable);
+            } else {
+              wrapper.complete(permit);
+            }
           });
+      return wrapper;
     }
   }
 }
