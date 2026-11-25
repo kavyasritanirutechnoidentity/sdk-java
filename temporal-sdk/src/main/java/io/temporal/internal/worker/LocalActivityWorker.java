@@ -404,6 +404,9 @@ final class LocalActivityWorker implements Startable, Shutdownable {
       boolean taskFailed = false;
       boolean taskExecuted = false;
       PrefixedMdc mdc = options.getLoggerMdc();
+      // The permit this attempt was dispatched with. It must be captured so a late-returning
+      // stale attempt cannot release a newer attempt's permit from the shared context.
+      final SlotPermit attemptPermit = executionContext.getPermit();
 
       try {
         // if an activity was already completed by any mean like scheduleToClose or scheduleToStart,
@@ -436,7 +439,7 @@ final class LocalActivityWorker implements Startable, Shutdownable {
                     activityTask, namespace, taskQueue, true),
                 options.getIdentity(),
                 options.getBuildId()),
-            executionContext.getPermit());
+            attemptPermit);
 
         ScheduledFuture<?> startToCloseTimeoutFuture = null;
 
@@ -458,10 +461,7 @@ final class LocalActivityWorker implements Startable, Shutdownable {
           activityHandlerResult =
               handler.handle(
                   new ActivityTask(
-                      activityTask,
-                      executionContext.getPermit(),
-                      () -> {},
-                      executionContext.getArguments()),
+                      activityTask, attemptPermit, () -> {}, executionContext.getArguments()),
                   metricsScope,
                   true);
         } finally {
@@ -505,9 +505,11 @@ final class LocalActivityWorker implements Startable, Shutdownable {
             taskCounter.recordFailed();
           }
         }
-        SlotPermit releasedPermit = executionContext.takePermit();
-        if (releasedPermit != null) {
-          slotSupplier.releaseSlot(reason, releasedPermit);
+        if (attemptPermit != null) {
+          SlotPermit releasedPermit = executionContext.takePermit(attemptPermit);
+          if (releasedPermit != null) {
+            slotSupplier.releaseSlot(reason, releasedPermit);
+          }
         }
         mdc.remove(LoggerTag.ACTIVITY_ID);
         mdc.remove(LoggerTag.ACTIVITY_TYPE);

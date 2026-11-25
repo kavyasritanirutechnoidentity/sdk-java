@@ -179,4 +179,15 @@ class LocalActivityExecutionContext {
   public SlotPermit takePermit() {
     return permit.getAndSet(null);
   }
+
+  /**
+   * Atomically takes ownership of {@code expected} permit only if it is still the current permit.
+   * Returns the released permit, or null if the context holds a different permit (for example a
+   * newer retry attempt's permit) or the permit was already taken. Attempt completion must use this
+   * method so a stale attempt cannot release a later attempt's permit.
+   */
+  @Nullable
+  public SlotPermit takePermit(@Nonnull SlotPermit expected) {
+    return permit.compareAndSet(expected, null) ? expected : null;
+  }
 }

@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
@@ -42,6 +43,7 @@ public class LocalActivityZombieRecoveryTest {
   private final CountDownLatch secondBlockStarted = new CountDownLatch(1);
   private final CountDownLatch secondBlockReturn = new CountDownLatch(1);
   private final Map<String, String> threadByInput = new ConcurrentHashMap<>();
+  private final AtomicInteger retryBlockInvocations = new AtomicInteger();
   private final CountingSlotSupplier<LocalActivitySlotInfo> slotSupplier =
       new CountingSlotSupplier<>(1);
 
@@ -71,7 +73,8 @@ public class LocalActivityZombieRecoveryTest {
                   firstBlockReturn,
                   secondBlockStarted,
                   secondBlockReturn,
-                  threadByInput))
+                  threadByInput,
+                  retryBlockInvocations))
           .setWorkflowTypes(TestWorkflowImpl.class)
           .setUseTimeskipping(false)
           .build();
@@ -86,7 +89,8 @@ public class LocalActivityZombieRecoveryTest {
                   firstBlockReturn,
                   secondBlockStarted,
                   secondBlockReturn,
-                  threadByInput))
+                  threadByInput,
+                  retryBlockInvocations))
           .setWorkflowTypes(TestWorkflowImpl.class)
           .setUseTimeskipping(false)
           .build();
@@ -194,6 +198,39 @@ public class LocalActivityZombieRecoveryTest {
   }
 
   /**
+   * When a running attempt times out and is retried, the timed-out attempt's permit is abandoned
+   * after scheduling the retry so the retry attempt can execute on a spare executor thread. The
+   * stale first attempt then returns while attempt 2 still runs: it must not release attempt 2's
+   * permit.
+   */
+  @Test(timeout = 90_000)
+  public void retryPathAbandonsTimedOutAttemptPermit() throws Exception {
+    WorkflowClient client = ruleAbandon.getWorkflowClient();
+    String taskQueue = ruleAbandon.getTaskQueue();
+
+    // "retryblock" attempt 1 blocks on the first latch, times out, and is retried. Attempt 2 gets
+    // the abandoned permit's slot on a spare thread and blocks on the second latch.
+    WorkflowStub workflow = startWorkflow(client, taskQueue, "retry-wf", "retryblock");
+    assertTrue("retry attempt never started", secondBlockStarted.await(20, TimeUnit.SECONDS));
+    assertEquals(2, retryBlockInvocations.get());
+
+    // Let the abandoned first attempt return while attempt 2 is still running. Its stale permit
+    // take must not release attempt 2's permit.
+    int releasesBefore = slotSupplier.releasedCount.get();
+    firstBlockReturn.countDown();
+    Thread.sleep(800);
+    assertEquals(
+        "stale first attempt released the retry attempt's permit",
+        releasesBefore,
+        slotSupplier.releasedCount.get());
+
+    // Attempt 2 completes; the retry succeeds and the workflow returns its result.
+    secondBlockReturn.countDown();
+    assertEquals("retryblock", workflow.getResult(30, TimeUnit.SECONDS, String.class));
+    assertEquals(slotSupplier.reservedCount.get(), slotSupplier.releasedCount.get());
+  }
+
+  /**
    * A timeout that loses the terminal-completion race must not release a permit: an activity that
    * completes normally before scheduleToClose fires leaves accounting untouched.
    */
@@ -248,18 +285,21 @@ public class LocalActivityZombieRecoveryTest {
     private final CountDownLatch secondStarted;
     private final CountDownLatch secondReturn;
     private final Map<String, String> threadByInput;
+    private final AtomicInteger retryBlockInvocations;
 
     public TestActivityImpl(
         CountDownLatch firstStarted,
         CountDownLatch firstReturn,
         CountDownLatch secondStarted,
         CountDownLatch secondReturn,
-        Map<String, String> threadByInput) {
+        Map<String, String> threadByInput,
+        AtomicInteger retryBlockInvocations) {
       this.firstStarted = firstStarted;
       this.firstReturn = firstReturn;
       this.secondStarted = secondStarted;
       this.secondReturn = secondReturn;
       this.threadByInput = threadByInput;
+      this.retryBlockInvocations = retryBlockInvocations;
     }
 
     @Override
@@ -272,6 +312,15 @@ public class LocalActivityZombieRecoveryTest {
       } else if ("block2".equals(input)) {
         secondStarted.countDown();
         await(secondReturn);
+      } else if ("retryblock".equals(input)) {
+        int invocation = retryBlockInvocations.incrementAndGet();
+        if (invocation == 1) {
+          firstStarted.countDown();
+          await(firstReturn);
+        } else {
+          secondStarted.countDown();
+          await(secondReturn);
+        }
       }
       return input;
     }
@@ -298,8 +347,16 @@ public class LocalActivityZombieRecoveryTest {
       LocalActivityOptions.Builder options =
           LocalActivityOptions.newBuilder()
               .setStartToCloseTimeout(
-                  input.startsWith("tout-") ? Duration.ofSeconds(2) : Duration.ofSeconds(30))
-              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build());
+                  input.startsWith("tout-") || "retryblock".equals(input)
+                      ? Duration.ofSeconds(2)
+                      : Duration.ofSeconds(30))
+              .setRetryOptions(
+                  "retryblock".equals(input)
+                      ? RetryOptions.newBuilder()
+                          .setMaximumAttempts(2)
+                          .setInitialInterval(Duration.ofMillis(100))
+                          .build()
+                      : RetryOptions.newBuilder().setMaximumAttempts(1).build());
       if ("stc-quick".equals(input)) {
         options.setScheduleToCloseTimeout(Duration.ofSeconds(2));
       }
