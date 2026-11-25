@@ -680,14 +680,17 @@ final class LocalActivityWorker implements Startable, Shutdownable {
 
       RetryDecision retryDecision = shouldRetry(executionContext, activityTask, null);
       if (retryDecision.doNextAttempt()) {
+        // The timed-out attempt may still be running user code holding a permit; abandon it so
+        // its executor capacity can serve the retry or other Local Activities. This must run
+        // before scheduling the retry: scheduleNextAttempt may dispatch the retry attempt when
+        // its backoff has already elapsed, and an unconditional take could otherwise consume the
+        // retry attempt's new permit instead of the timed-out attempt's.
+        abandonPermitIfRunning(executionContext);
         scheduleNextAttempt(
             executionContext,
             Objects.requireNonNull(
                 retryDecision.nextAttemptBackoff, "nextAttemptBackoff is expected to not be null"),
             newTimeoutFailure(TimeoutType.TIMEOUT_TYPE_START_TO_CLOSE, null));
-        // The timed-out attempt may still be running user code holding a permit; abandon it so
-        // its executor capacity can serve the retry or other Local Activities.
-        abandonPermitIfRunning(executionContext);
       } else {
         // RetryState.RETRY_STATE_TIMEOUT happens only when scheduleToClose is fired
         // scheduleToClose timeout is effectively replacing the original startToClose
