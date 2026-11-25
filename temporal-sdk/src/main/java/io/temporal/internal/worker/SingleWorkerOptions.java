@@ -55,6 +55,7 @@ public final class SingleWorkerOptions {
     private @Nullable ExternalStorageRunner externalStorageRunner;
     private CancellationToken<CancellationException> storageCancellation = CancellationToken.none();
     private PrefixedMdc loggerMdc;
+    private Duration defaultLocalActivityScheduleToStartTimeout;
 
     private Builder() {}
 
@@ -87,6 +88,8 @@ public final class SingleWorkerOptions {
       this.externalStorageRunner = options.getExternalStorageRunner();
       this.storageCancellation = options.getStorageCancellation();
       this.loggerMdc = options.getLoggerMdc();
+      this.defaultLocalActivityScheduleToStartTimeout =
+          options.getDefaultLocalActivityScheduleToStartTimeout();
     }
 
     public Builder setIdentity(String identity) {
@@ -135,6 +138,12 @@ public final class SingleWorkerOptions {
     public Builder setStickyQueueScheduleToStartTimeout(
         Duration stickyQueueScheduleToStartTimeout) {
       this.stickyQueueScheduleToStartTimeout = stickyQueueScheduleToStartTimeout;
+      return this;
+    }
+
+    public Builder setDefaultLocalActivityScheduleToStartTimeout(
+        Duration defaultLocalActivityScheduleToStartTimeout) {
+      this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
       return this;
     }
 
@@ -272,7 +281,8 @@ public final class SingleWorkerOptions {
           this.preferredVersionProvider,
           this.externalStorageRunner,
           this.storageCancellation,
-          loggerMdc);
+          loggerMdc,
+          this.defaultLocalActivityScheduleToStartTimeout);
     }
   }
 
@@ -301,6 +311,7 @@ public final class SingleWorkerOptions {
   private final @Nullable ExternalStorageRunner externalStorageRunner;
   private final CancellationToken<CancellationException> storageCancellation;
   private final PrefixedMdc loggerMdc;
+  private final @Nullable Duration defaultLocalActivityScheduleToStartTimeout;
 
   private SingleWorkerOptions(
       String identity,
@@ -327,7 +338,8 @@ public final class SingleWorkerOptions {
       PreferredVersionProvider preferredVersionProvider,
       @Nullable ExternalStorageRunner externalStorageRunner,
       CancellationToken<CancellationException> storageCancellation,
-      PrefixedMdc loggerMdc) {
+      PrefixedMdc loggerMdc,
+      @Nullable Duration defaultLocalActivityScheduleToStartTimeout) {
     this.identity = identity;
     this.binaryChecksum = binaryChecksum;
     this.buildId = buildId;
@@ -353,6 +365,7 @@ public final class SingleWorkerOptions {
     this.externalStorageRunner = externalStorageRunner;
     this.storageCancellation = storageCancellation;
     this.loggerMdc = loggerMdc;
+    this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
   }
 
   public String getIdentity() {
@@ -426,6 +439,11 @@ public final class SingleWorkerOptions {
 
   public Duration getStickyQueueScheduleToStartTimeout() {
     return stickyQueueScheduleToStartTimeout;
+  }
+
+  @Nullable
+  public Duration getDefaultLocalActivityScheduleToStartTimeout() {
+    return defaultLocalActivityScheduleToStartTimeout;
   }
 
   public long getDefaultDeadlockDetectionTimeout() {

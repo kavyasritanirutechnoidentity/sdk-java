@@ -89,6 +89,9 @@ final class LocalActivityWorker implements Startable, Shutdownable {
       @Nonnull PollActivityTaskQueueResponse.Builder activityTask,
       boolean isRetry) {
     @Nullable Duration scheduleToStartTimeout = executionContext.getScheduleToStartTimeout();
+    if (scheduleToStartTimeout == null) {
+      scheduleToStartTimeout = options.getDefaultLocalActivityScheduleToStartTimeout();
+    }
     @Nullable final ScheduledFuture<?> scheduleToStartFuture;
     if (scheduleToStartTimeout != null) {
       scheduleToStartFuture =

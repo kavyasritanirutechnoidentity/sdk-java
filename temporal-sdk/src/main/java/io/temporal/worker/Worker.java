@@ -1161,6 +1161,8 @@ public final class Worker {
                 .build())
         .setMetricsScope(metricsScope)
         .setUsingVirtualThreads(options.isUsingVirtualThreadsOnLocalActivityWorker())
+        .setDefaultLocalActivityScheduleToStartTimeout(
+            options.getDefaultLocalActivityScheduleToStartTimeout())
         .build();
   }
 

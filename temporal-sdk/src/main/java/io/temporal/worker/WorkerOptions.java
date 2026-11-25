@@ -89,6 +89,7 @@ public final class WorkerOptions {
     private boolean workflowTaskPollersConfigured;
     private boolean activityTaskPollersConfigured;
     private boolean nexusTaskPollersConfigured;
+    private Duration defaultLocalActivityScheduleToStartTimeout;
 
     private Builder() {}
 
@@ -132,6 +133,8 @@ public final class WorkerOptions {
       this.workflowTaskPollersConfigured = o.workflowTaskPollersConfigured;
       this.activityTaskPollersConfigured = o.activityTaskPollersConfigured;
       this.nexusTaskPollersConfigured = o.nexusTaskPollersConfigured;
+      this.defaultLocalActivityScheduleToStartTimeout =
+          o.defaultLocalActivityScheduleToStartTimeout;
     }
 
     /**
@@ -387,6 +390,24 @@ public final class WorkerOptions {
      */
     public Builder setStickyQueueScheduleToStartTimeout(Duration timeout) {
       this.stickyQueueScheduleToStartTimeout = timeout;
+      return this;
+    }
+
+    /**
+     * Default ScheduleToStart timeout applied to Local Activities that do not explicitly configure
+     * {@link io.temporal.activity.LocalActivityOptions.Builder#setScheduleToStartTimeout}. The
+     * ScheduleToStart timer covers the time a Local Activity waits for an executor slot, so this
+     * bound also limits how long a Local Activity may wait when the Local Activity executor pool is
+     * exhausted.
+     *
+     * <p>If unset or null, Local Activities without an explicit ScheduleToStart timeout wait for an
+     * executor slot indefinitely, preserving previous behaviour.
+     *
+     * <p>Experimental. This API may change in a future release.
+     */
+    @Experimental
+    public Builder setDefaultLocalActivityScheduleToStartTimeout(@Nullable Duration timeout) {
+      this.defaultLocalActivityScheduleToStartTimeout = timeout;
       return this;
     }
 
@@ -684,7 +705,8 @@ public final class WorkerOptions {
           preferredVersionProvider,
           workflowTaskPollersConfigured,
           activityTaskPollersConfigured,
-          nexusTaskPollersConfigured);
+          nexusTaskPollersConfigured,
+          defaultLocalActivityScheduleToStartTimeout);
     }
 
     public WorkerOptions validateAndBuildWithDefaults() {
@@ -827,7 +849,8 @@ public final class WorkerOptions {
           preferredVersionProvider,
           workflowTaskPollersConfigured,
           activityTaskPollersConfigured,
-          nexusTaskPollersConfigured);
+          nexusTaskPollersConfigured,
+          defaultLocalActivityScheduleToStartTimeout);
     }
   }
 
@@ -866,6 +889,7 @@ public final class WorkerOptions {
   private final boolean workflowTaskPollersConfigured;
   private final boolean activityTaskPollersConfigured;
   private final boolean nexusTaskPollersConfigured;
+  private final @Nullable Duration defaultLocalActivityScheduleToStartTimeout;
 
   private WorkerOptions(
       double maxWorkerActivitiesPerSecond,
@@ -902,7 +926,8 @@ public final class WorkerOptions {
       PreferredVersionProvider preferredVersionProvider,
       boolean workflowTaskPollersConfigured,
       boolean activityTaskPollersConfigured,
-      boolean nexusTaskPollersConfigured) {
+      boolean nexusTaskPollersConfigured,
+      @Nullable Duration defaultLocalActivityScheduleToStartTimeout) {
     this.maxWorkerActivitiesPerSecond = maxWorkerActivitiesPerSecond;
     this.maxConcurrentActivityExecutionSize = maxConcurrentActivityExecutionSize;
     this.maxConcurrentWorkflowTaskExecutionSize = maxConcurrentWorkflowTaskExecutionSize;
@@ -938,6 +963,7 @@ public final class WorkerOptions {
     this.workflowTaskPollersConfigured = workflowTaskPollersConfigured;
     this.activityTaskPollersConfigured = activityTaskPollersConfigured;
     this.nexusTaskPollersConfigured = nexusTaskPollersConfigured;
+    this.defaultLocalActivityScheduleToStartTimeout = defaultLocalActivityScheduleToStartTimeout;
   }
 
   /**
@@ -967,6 +993,16 @@ public final class WorkerOptions {
    */
   boolean isNexusTaskPollerAutoEnrollEligible() {
     return !nexusTaskPollersConfigured;
+  }
+
+  /**
+   * @return the worker-wide default ScheduleToStart timeout applied to Local Activities that do not
+   *     configure one explicitly, or null if no default is set.
+   */
+  @Experimental
+  @Nullable
+  public Duration getDefaultLocalActivityScheduleToStartTimeout() {
+    return defaultLocalActivityScheduleToStartTimeout;
   }
 
   public double getMaxWorkerActivitiesPerSecond() {
@@ -1159,7 +1195,10 @@ public final class WorkerOptions {
         && Objects.equals(nexusTaskPollersBehavior, that.nexusTaskPollersBehavior)
         && allowActivityHeartbeatDuringShutdown == that.allowActivityHeartbeatDuringShutdown
         && disablePayloadErrorLimit == that.disablePayloadErrorLimit
-        && Objects.equals(preferredVersionProvider, that.preferredVersionProvider);
+        && Objects.equals(preferredVersionProvider, that.preferredVersionProvider)
+        && Objects.equals(
+            defaultLocalActivityScheduleToStartTimeout,
+            that.defaultLocalActivityScheduleToStartTimeout);
   }
 
   @Override
@@ -1196,7 +1235,8 @@ public final class WorkerOptions {
         nexusTaskPollersBehavior,
         allowActivityHeartbeatDuringShutdown,
         disablePayloadErrorLimit,
-        preferredVersionProvider);
+        preferredVersionProvider,
+        defaultLocalActivityScheduleToStartTimeout);
   }
 
   @Override
@@ -1267,6 +1307,8 @@ public final class WorkerOptions {
         + disablePayloadErrorLimit
         + ", preferredVersionProvider="
         + preferredVersionProvider
+        + ", defaultLocalActivityScheduleToStartTimeout="
+        + defaultLocalActivityScheduleToStartTimeout
         + '}';
   }
 }
