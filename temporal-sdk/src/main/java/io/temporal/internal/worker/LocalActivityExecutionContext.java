@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nonnull;
@@ -26,7 +27,18 @@ class LocalActivityExecutionContext {
   private @Nullable ScheduledFuture<?> scheduleToCloseFuture;
   private final @Nonnull CompletableFuture<LocalActivityResult> executionResult =
       new CompletableFuture<>();
-  private final AtomicReference<SlotPermit> permit = new AtomicReference<>();
+
+  /**
+   * The permit the currently dispatched attempt was granted, wrapped in an attempt-scoped owner.
+   * Each granted permit gets its own {@link AttemptPermit} whose released flag guarantees
+   * exactly-once release across completion, timeout abandonment and error paths — including when a
+   * newer attempt's permit supersedes this reference while an older attempt is still running.
+   * Ownership transitions happen in two ways: atomic take operations ({@link #takePermit()} and
+   * {@link #takePermit(SlotPermit)}), and blocks synchronized on this execution context which
+   * coordinate permit tracking (markSlotUsed) with permit release so a released permit is never
+   * re-added to used-slots accounting.
+   */
+  private final AtomicReference<AttemptPermit> permit = new AtomicReference<>();
 
   public LocalActivityExecutionContext(
       @Nonnull ExecuteLocalActivityParameters executionParams,
@@ -162,13 +174,40 @@ class LocalActivityExecutionContext {
     executionParams.getOnNewAttemptCallback().apply();
   }
 
+  /**
+   * Attempt-scoped permit ownership. Every granted permit gets its own {@code released} flag so
+   * exactly one path — attempt completion, timeout abandonment or error cleanup — releases it,
+   * independent of what the shared {@link #permit} reference points to.
+   */
+  static final class AttemptPermit {
+    final SlotPermit permit;
+    private final AtomicBoolean released = new AtomicBoolean();
+
+    private AttemptPermit(SlotPermit permit) {
+      this.permit = permit;
+    }
+
+    /**
+     * Returns the permit if this caller wins the release exactly once, or null if already taken.
+     */
+    @Nullable
+    SlotPermit take() {
+      return released.compareAndSet(false, true) ? permit : null;
+    }
+  }
+
   public void setPermit(SlotPermit permit) {
-    this.permit.set(permit);
+    this.permit.set(new AttemptPermit(permit));
   }
 
   @Nullable
-  public SlotPermit getPermit() {
+  AttemptPermit getPermitHolder() {
     return permit.get();
+  }
+
+  /** Clears the current permit reference if it still points to {@code holder}. */
+  void clearPermit(@Nonnull AttemptPermit holder) {
+    permit.compareAndSet(holder, null);
   }
 
   /**
@@ -177,17 +216,21 @@ class LocalActivityExecutionContext {
    */
   @Nullable
   public SlotPermit takePermit() {
-    return permit.getAndSet(null);
+    AttemptPermit holder = permit.getAndSet(null);
+    return holder == null ? null : holder.take();
   }
 
   /**
    * Atomically takes ownership of {@code expected} permit only if it is still the current permit.
    * Returns the released permit, or null if the context holds a different permit (for example a
-   * newer retry attempt's permit) or the permit was already taken. Attempt completion must use this
-   * method so a stale attempt cannot release a later attempt's permit.
+   * newer retry attempt's permit) or the permit was already taken.
    */
   @Nullable
   public SlotPermit takePermit(@Nonnull SlotPermit expected) {
-    return permit.compareAndSet(expected, null) ? expected : null;
+    AttemptPermit holder = permit.get();
+    if (holder == null || holder.permit != expected || !permit.compareAndSet(holder, null)) {
+      return null;
+    }
+    return holder.take();
   }
 }

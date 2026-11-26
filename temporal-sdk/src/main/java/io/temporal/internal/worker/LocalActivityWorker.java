@@ -404,9 +404,10 @@ final class LocalActivityWorker implements Startable, Shutdownable {
       boolean taskFailed = false;
       boolean taskExecuted = false;
       PrefixedMdc mdc = options.getLoggerMdc();
-      // The permit this attempt was dispatched with. It must be captured so a late-returning
-      // stale attempt cannot release a newer attempt's permit from the shared context.
-      final SlotPermit attemptPermit = executionContext.getPermit();
+      // The permit owner this attempt was dispatched with. It must be captured so a late-returning
+      // stale attempt releases only its own permit and never a newer attempt's.
+      final LocalActivityExecutionContext.AttemptPermit attemptPermit =
+          executionContext.getPermitHolder();
 
       try {
         // if an activity was already completed by any mean like scheduleToClose or scheduleToStart,
@@ -433,13 +434,20 @@ final class LocalActivityWorker implements Startable, Shutdownable {
         mdc.put(LoggerTag.RUN_ID, activityTask.getWorkflowExecution().getRunId());
         mdc.put(LoggerTag.ATTEMPT, Integer.toString(activityTask.getAttempt()));
 
-        slotSupplier.markSlotUsed(
-            new LocalActivitySlotInfo(
-                ActivityPollResponseToInfo.toActivityInfoImpl(
-                    activityTask, namespace, taskQueue, true),
-                options.getIdentity(),
-                options.getBuildId()),
-            attemptPermit);
+        // Mark the slot used only while this attempt still owns its permit. Synchronizing on the
+        // execution context makes the check-and-mark atomic with permit abandonment and final
+        // release, so a permit already released cannot be re-added to the used-slots accounting.
+        synchronized (executionContext) {
+          if (attemptPermit != null && attemptPermit == executionContext.getPermitHolder()) {
+            slotSupplier.markSlotUsed(
+                new LocalActivitySlotInfo(
+                    ActivityPollResponseToInfo.toActivityInfoImpl(
+                        activityTask, namespace, taskQueue, true),
+                    options.getIdentity(),
+                    options.getBuildId()),
+                attemptPermit.permit);
+          }
+        }
 
         ScheduledFuture<?> startToCloseTimeoutFuture = null;
 
@@ -461,7 +469,10 @@ final class LocalActivityWorker implements Startable, Shutdownable {
           activityHandlerResult =
               handler.handle(
                   new ActivityTask(
-                      activityTask, attemptPermit, () -> {}, executionContext.getArguments()),
+                      activityTask,
+                      attemptPermit == null ? null : attemptPermit.permit,
+                      () -> {},
+                      executionContext.getArguments()),
                   metricsScope,
                   true);
         } finally {
@@ -506,9 +517,14 @@ final class LocalActivityWorker implements Startable, Shutdownable {
           }
         }
         if (attemptPermit != null) {
-          SlotPermit releasedPermit = executionContext.takePermit(attemptPermit);
-          if (releasedPermit != null) {
-            slotSupplier.releaseSlot(reason, releasedPermit);
+          synchronized (executionContext) {
+            // The attempt-scoped owner guarantees exactly-once release: stale attempts still
+            // release their own permit if it was never taken, but cannot touch a newer attempt's.
+            SlotPermit releasedPermit = attemptPermit.take();
+            if (releasedPermit != null) {
+              executionContext.clearPermit(attemptPermit);
+              slotSupplier.releaseSlot(reason, releasedPermit);
+            }
           }
         }
         mdc.remove(LoggerTag.ACTIVITY_ID);
@@ -623,14 +639,22 @@ final class LocalActivityWorker implements Startable, Shutdownable {
     if (!options.getLocalActivityAbandonTimedOutExecutions()) {
       return;
     }
-    SlotPermit permit = executionContext.takePermit();
+    // The permit take and release happen under the execution context monitor so a concurrent
+    // markSlotUsed cannot observe the released permit and re-add it to used-slots accounting.
+    // releaseSlot is required to be non-blocking by the SlotSupplier contract.
+    SlotPermit permit;
+    synchronized (executionContext) {
+      permit = executionContext.takePermit();
+      if (permit != null) {
+        slotSupplier.releaseSlot(SlotReleaseReason.abandoned(), permit);
+      }
+    }
     if (permit != null) {
       log.warn(
           "Abandoning executor permit of local activity {} after timeout. User code may still be "
               + "executing on an abandoned thread that no longer counts towards the local activity "
               + "concurrency limit.",
           executionContext.getActivityId());
-      slotSupplier.releaseSlot(SlotReleaseReason.abandoned(), permit);
     }
   }
 
