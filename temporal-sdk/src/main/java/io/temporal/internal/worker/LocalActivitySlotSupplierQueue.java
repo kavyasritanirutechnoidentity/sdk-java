@@ -122,7 +122,18 @@ class LocalActivitySlotSupplierQueue implements Shutdownable {
         // executor level, otherwise, the LA handler itself should be handling errors)
         log.error("Unexpected error submitting local activity task to worker", e);
         if (slotPermit != null) {
-          slotSupplier.releaseSlot(SlotReleaseReason.error(new RuntimeException(e)), slotPermit);
+          LocalActivityExecutionContext executionContext = request.task.getExecutionContext();
+          // Take the permit back through the context so this release cannot interleave with a
+          // markSlotUsed check in the dispatched attempt or race a concurrent permit abandonment,
+          // either of which would release the same permit twice. A null return means another
+          // owner already released it.
+          synchronized (executionContext) {
+            SlotPermit ownedPermit = executionContext.takePermit(slotPermit);
+            if (ownedPermit != null) {
+              slotSupplier.releaseSlot(
+                  SlotReleaseReason.error(new RuntimeException(e)), ownedPermit);
+            }
+          }
         }
         if (request != null) {
           LocalActivityExecutionContext executionContext = request.task.getExecutionContext();
