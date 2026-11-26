@@ -42,12 +42,18 @@ public class LocalActivityZombieRecoveryTest {
   private final CountDownLatch firstBlockReturn = new CountDownLatch(1);
   private final CountDownLatch secondBlockStarted = new CountDownLatch(1);
   private final CountDownLatch secondBlockReturn = new CountDownLatch(1);
+  private final CountDownLatch thirdBlockStarted = new CountDownLatch(1);
   private final Map<String, String> threadByInput = new ConcurrentHashMap<>();
   private final AtomicInteger retryBlockInvocations = new AtomicInteger();
   private final CountingSlotSupplier<LocalActivitySlotInfo> slotSupplier =
       new CountingSlotSupplier<>(1);
 
   private WorkerOptions workerOptions(boolean abandonEnabled) {
+    // A positive allowance must not expand executor capacity when abandonment is disabled.
+    return workerOptions(abandonEnabled, abandonEnabled ? 1 : 5);
+  }
+
+  private WorkerOptions workerOptions(boolean abandonEnabled, int maxAbandonedExecutions) {
     WorkerOptions.Builder builder =
         WorkerOptions.newBuilder()
             .setWorkerTuner(
@@ -57,9 +63,7 @@ public class LocalActivityZombieRecoveryTest {
                     slotSupplier,
                     new FixedSizeSlotSupplier<NexusSlotInfo>(10)))
             .setLocalActivityAbandonTimedOutExecutions(abandonEnabled)
-            // A positive allowance must not expand executor capacity when abandonment is
-            // disabled.
-            .setLocalActivityMaxAbandonedExecutions(abandonEnabled ? 1 : 5);
+            .setLocalActivityMaxAbandonedExecutions(maxAbandonedExecutions);
     return builder.build();
   }
 
@@ -73,6 +77,7 @@ public class LocalActivityZombieRecoveryTest {
                   firstBlockReturn,
                   secondBlockStarted,
                   secondBlockReturn,
+                  thirdBlockStarted,
                   threadByInput,
                   retryBlockInvocations))
           .setWorkflowTypes(TestWorkflowImpl.class)
@@ -89,6 +94,24 @@ public class LocalActivityZombieRecoveryTest {
                   firstBlockReturn,
                   secondBlockStarted,
                   secondBlockReturn,
+                  thirdBlockStarted,
+                  threadByInput,
+                  retryBlockInvocations))
+          .setWorkflowTypes(TestWorkflowImpl.class)
+          .setUseTimeskipping(false)
+          .build();
+
+  @Rule
+  public SDKTestWorkflowRule ruleZeroAbandon =
+      SDKTestWorkflowRule.newBuilder()
+          .setWorkerOptions(workerOptions(true, 0))
+          .setActivityImplementations(
+              new TestActivityImpl(
+                  firstBlockStarted,
+                  firstBlockReturn,
+                  secondBlockStarted,
+                  secondBlockReturn,
+                  thirdBlockStarted,
                   threadByInput,
                   retryBlockInvocations))
           .setWorkflowTypes(TestWorkflowImpl.class)
@@ -231,6 +254,142 @@ public class LocalActivityZombieRecoveryTest {
   }
 
   /**
+   * Worker shutdown cannot terminate abandoned user code: a timed-out blocked activity's permit is
+   * abandoned, the worker factory shuts down without hanging, and the abandoned thread keeps
+   * running (its latch is never released).
+   */
+  @Test(timeout = 60_000)
+  public void workerShutdownLeavesAbandonedThreadRunning() throws Exception {
+    WorkflowClient client = ruleAbandon.getWorkflowClient();
+    String taskQueue = ruleAbandon.getTaskQueue();
+
+    WorkflowStub blocked = startWorkflow(client, taskQueue, "shutdown-zombie", "tout-block");
+    assertTrue(firstBlockStarted.await(10, TimeUnit.SECONDS));
+    try {
+      blocked.getResult(30, TimeUnit.SECONDS, String.class);
+      fail("blocked workflow should have failed with a timeout");
+    } catch (WorkflowFailedException e) {
+      assertTrue("expected timeout but got: " + e, hasTimeoutFailure(e));
+    }
+
+    // The permit was abandoned; shutdown must not block on the still-running abandoned thread.
+    ruleAbandon.getTestEnvironment().getWorkerFactory().shutdownNow();
+    assertEquals(
+        "abandoned thread must still be running blocked user code", 1, firstBlockReturn.getCount());
+  }
+
+  /**
+   * Abandonment with a zero abandoned-execution allowance must not create additional executor
+   * threads: the timed-out attempt's permit is still released so a second Local Activity reserves
+   * capacity, but it cannot dispatch until the blocked thread returns and frees the executor.
+   */
+  @Test(timeout = 60_000)
+  public void abandonedPermitWithZeroAllowanceWaitsForPhysicalThread() throws Exception {
+    WorkflowClient client = ruleZeroAbandon.getWorkflowClient();
+    String taskQueue = ruleZeroAbandon.getTaskQueue();
+
+    WorkflowStub blocked = startWorkflow(client, taskQueue, "zero-block", "tout-block");
+    assertTrue(firstBlockStarted.await(10, TimeUnit.SECONDS));
+    try {
+      blocked.getResult(30, TimeUnit.SECONDS, String.class);
+      fail("blocked workflow should have failed with a timeout");
+    } catch (WorkflowFailedException e) {
+      assertTrue("expected timeout but got: " + e, hasTimeoutFailure(e));
+    }
+    // Wait for the terminal timeout to abandon the permit; the workflow-side failure is observed
+    // before the synchronous releaseSlot necessarily completes.
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (slotSupplier.releasedCount.get() < 1 && System.currentTimeMillis() < deadline) {
+      Thread.sleep(50);
+    }
+    assertEquals("abandoned permit must be released", 1, slotSupplier.releasedCount.get());
+
+    WorkflowStub recovery = startWorkflow(client, taskQueue, "zero-second", "done");
+    try {
+      recovery.getResult(5, TimeUnit.SECONDS, String.class);
+      fail("replacement must wait for the physically blocked executor thread");
+    } catch (TimeoutException e) {
+      // The reserved permit cannot dispatch while the single executor thread remains blocked.
+    }
+    firstBlockReturn.countDown();
+    assertEquals("done", recovery.getResult(30, TimeUnit.SECONDS, String.class));
+    assertEquals(slotSupplier.reservedCount.get(), slotSupplier.releasedCount.get());
+  }
+
+  /**
+   * Two consecutive attempts time out while blocked: each abandonment releases only that attempt's
+   * permit, and late returns from attempts A and B must not release attempt C's permit. With both
+   * executor threads occupied by zombies, C cannot dispatch until a zombie returns.
+   */
+  @Test(timeout = 60_000)
+  public void consecutiveRetryAbandonmentsDoNotReleaseNewerPermit() throws Exception {
+    WorkflowClient client = ruleAbandon.getWorkflowClient();
+    String taskQueue = ruleAbandon.getTaskQueue();
+
+    WorkflowStub workflow = startWorkflow(client, taskQueue, "retrythree-wf", "retrythree");
+    assertTrue(firstBlockStarted.await(10, TimeUnit.SECONDS));
+    assertTrue(secondBlockStarted.await(15, TimeUnit.SECONDS));
+    assertEquals(
+        "attempts A and B must each hold and abandon their own permit",
+        2,
+        retryBlockInvocations.get());
+    // Wait for B's startToClose timeout to fire and abandon its permit before continuing.
+    long deadline = System.currentTimeMillis() + 15_000;
+    while (slotSupplier.releasedCount.get() < 2 && System.currentTimeMillis() < deadline) {
+      Thread.sleep(50);
+    }
+    assertEquals(2, slotSupplier.releasedCount.get());
+
+    // Both N+Z threads are zombies, so attempt C cannot dispatch even though its permit is free.
+    assertFalse(
+        "attempt C must wait while both executor threads are blocked",
+        thirdBlockStarted.await(3, TimeUnit.SECONDS));
+
+    // Late returns from stale attempts A and B must not release attempt C's permit.
+    firstBlockReturn.countDown();
+    secondBlockReturn.countDown();
+    assertTrue(thirdBlockStarted.await(20, TimeUnit.SECONDS));
+    assertEquals("retrythree", workflow.getResult(30, TimeUnit.SECONDS, String.class));
+    assertEquals(
+        "every reserved permit must be released exactly once",
+        slotSupplier.reservedCount.get(),
+        slotSupplier.releasedCount.get());
+    assertEquals(3, retryBlockInvocations.get());
+  }
+
+  /**
+   * With abandonment disabled, a retry waits for the timed-out attempt's permit: the retry's slot
+   * reservation blocks until the first attempt returns, and the stale attempt still releases its
+   * own permit exactly once even though a newer attempt owns the shared context state.
+   */
+  @Test(timeout = 60_000)
+  public void disabledAbandonmentStaleAttemptStillReleasesOwnPermit() throws Exception {
+    WorkflowClient client = ruleNoAbandon.getWorkflowClient();
+    String taskQueue = ruleNoAbandon.getTaskQueue();
+
+    WorkflowStub workflow = startWorkflow(client, taskQueue, "noab-retry", "retryblock");
+    assertTrue(firstBlockStarted.await(10, TimeUnit.SECONDS));
+
+    // Attempt 1 times out while blocked; with abandonment disabled the retry's reservation waits
+    // for the single slot until attempt 1's blocked user code returns.
+    Thread.sleep(3500);
+    assertEquals(
+        "retry must not have started while the permit is still held",
+        1,
+        retryBlockInvocations.get());
+
+    firstBlockReturn.countDown();
+    assertTrue(secondBlockStarted.await(15, TimeUnit.SECONDS));
+    secondBlockReturn.countDown();
+    assertEquals("retryblock", workflow.getResult(30, TimeUnit.SECONDS, String.class));
+    assertEquals(
+        "every reserved permit must be released exactly once",
+        slotSupplier.reservedCount.get(),
+        slotSupplier.releasedCount.get());
+    assertEquals(2, retryBlockInvocations.get());
+  }
+
+  /**
    * A timeout that loses the terminal-completion race must not release a permit: an activity that
    * completes normally before scheduleToClose fires leaves accounting untouched.
    */
@@ -284,6 +443,7 @@ public class LocalActivityZombieRecoveryTest {
     private final CountDownLatch firstReturn;
     private final CountDownLatch secondStarted;
     private final CountDownLatch secondReturn;
+    private final CountDownLatch thirdStarted;
     private final Map<String, String> threadByInput;
     private final AtomicInteger retryBlockInvocations;
 
@@ -292,12 +452,14 @@ public class LocalActivityZombieRecoveryTest {
         CountDownLatch firstReturn,
         CountDownLatch secondStarted,
         CountDownLatch secondReturn,
+        CountDownLatch thirdStarted,
         Map<String, String> threadByInput,
         AtomicInteger retryBlockInvocations) {
       this.firstStarted = firstStarted;
       this.firstReturn = firstReturn;
       this.secondStarted = secondStarted;
       this.secondReturn = secondReturn;
+      this.thirdStarted = thirdStarted;
       this.threadByInput = threadByInput;
       this.retryBlockInvocations = retryBlockInvocations;
     }
@@ -312,14 +474,16 @@ public class LocalActivityZombieRecoveryTest {
       } else if ("block2".equals(input)) {
         secondStarted.countDown();
         await(secondReturn);
-      } else if ("retryblock".equals(input)) {
+      } else if ("retryblock".equals(input) || "retrythree".equals(input)) {
         int invocation = retryBlockInvocations.incrementAndGet();
         if (invocation == 1) {
           firstStarted.countDown();
           await(firstReturn);
-        } else {
+        } else if (invocation == 2) {
           secondStarted.countDown();
           await(secondReturn);
+        } else {
+          thirdStarted.countDown();
         }
       }
       return input;
@@ -347,7 +511,9 @@ public class LocalActivityZombieRecoveryTest {
       LocalActivityOptions.Builder options =
           LocalActivityOptions.newBuilder()
               .setStartToCloseTimeout(
-                  input.startsWith("tout-") || "retryblock".equals(input)
+                  input.startsWith("tout-")
+                          || "retryblock".equals(input)
+                          || "retrythree".equals(input)
                       ? Duration.ofSeconds(2)
                       : Duration.ofSeconds(30))
               .setRetryOptions(
@@ -356,7 +522,12 @@ public class LocalActivityZombieRecoveryTest {
                           .setMaximumAttempts(2)
                           .setInitialInterval(Duration.ofMillis(100))
                           .build()
-                      : RetryOptions.newBuilder().setMaximumAttempts(1).build());
+                      : "retrythree".equals(input)
+                          ? RetryOptions.newBuilder()
+                              .setMaximumAttempts(3)
+                              .setInitialInterval(Duration.ofMillis(100))
+                              .build()
+                          : RetryOptions.newBuilder().setMaximumAttempts(1).build());
       if ("stc-quick".equals(input)) {
         options.setScheduleToCloseTimeout(Duration.ofSeconds(2));
       }
