@@ -19,6 +19,23 @@ to docs, or any other relevant information.
 
 ## [Unreleased]
 
+### Added
+- Experimental `WorkerOptions` for bounded recovery from Local Activity executor exhaustion
+  (issue #2823). `setLocalActivityAbandonTimedOutExecutions` releases the executor slot permit of a
+  Local Activity that reaches a terminal StartToClose or ScheduleToClose timeout while its user
+  code is still running, allowing other Local Activities to use that capacity.
+  `setLocalActivityMaxAbandonedExecutions` bounds the number of additional executor threads
+  allowed for such abandoned executions. Abandoned user code is not interrupted and keeps running;
+  a retry may overlap with it.
+- Experimental `WorkerOptions.Builder.setDefaultLocalActivityScheduleToStartTimeout` to apply a
+  default ScheduleToStart timeout to Local Activities that do not configure one explicitly.
+
+### Fixed
+- Fixed Local Activity worker capacity exhaustion when a Local Activity times out while its
+  Java thread remains blocked in user code. Blocked threads are not terminated; the timed-out
+  attempt's permit can now be released so subsequent Local Activities can execute within the
+  configured additional capacity.
+
 ### Changed
 - Updated Cloud API bindings to v0.27.0, including opt-in user group memberships, projects,
   project-scoped custom roles, and caller rate limits.

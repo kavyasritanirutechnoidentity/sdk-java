@@ -424,7 +424,9 @@ public final class WorkerOptions {
      * attempt. Abandoned execution is bounded by {@link
      * #setLocalActivityMaxAbandonedExecutions(int)}.
      *
-     * <p>This does not interrupt, cancel or terminate user code. Disabled by default.
+     * <p>This does not interrupt, cancel or terminate user code. Abandoned threads may outlive
+     * worker shutdown and, if user code never returns, can accumulate across worker restarts.
+     * Disabled by default.
      *
      * <p>Experimental. This API may change in a future release.
      */
@@ -438,6 +440,9 @@ public final class WorkerOptions {
      * Maximum number of additional executor threads allowed for abandoned Local Activity executions
      * whose timed-out user code keeps running. When the bound is reached, the worker behaves as if
      * abandonment is disabled until an abandoned thread returns.
+     *
+     * <p>This bound applies to platform-thread Local Activity executors only. When the worker uses
+     * virtual threads, the executor is unbounded and abandoned executions are virtual threads.
      *
      * <p>Default is 0.
      *
